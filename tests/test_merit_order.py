@@ -161,7 +161,7 @@ class TestMeritOrderCalculation:
     
     def test_demand_allocation(self, sample_suppliers):
         """需要が正しく配分されたことを確認"""
-        analyzer = MeritObjectOrderAnalyzer(sample_suppliers)
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
         result = analyzer.calculate_merit_order({
             "required_qty": 5000,
         })
