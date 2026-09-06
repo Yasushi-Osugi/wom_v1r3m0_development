@@ -7,7 +7,11 @@ Merit Order分析エンジンの単体テスト
 
 import pytest
 import json
-from wom.visualization.merit_order import MeritOrderAnalyzer
+from datetime import datetime
+from wom.visualization.merit_order import (
+    MeritOrderAnalyzer,
+    load_suppliers_from_csv,
+)
 
 
 @pytest.fixture
@@ -340,6 +344,179 @@ class TestEndToEnd:
         with open(output_file) as f:
             saved_result = json.load(f)
         assert saved_result["week"] == "2026-W36"
+
+
+class TestHelperFunctions:
+    """ヘルパー関数のテスト"""
+
+    def test_load_suppliers_csv_file_not_found(self):
+        """ファイルが存在しない場合"""
+        with pytest.raises(FileNotFoundError, match="not found"):
+            load_suppliers_from_csv("/nonexistent/path.csv")
+
+    def test_load_suppliers_csv_invalid_format(self, tmp_path):
+        """CSV 形式が不正な場合（未終端のクォートでトークナイズエラーを誘発）"""
+        invalid_csv = tmp_path / "invalid.csv"
+        invalid_csv.write_text(
+            "supplier_id,supplier_name,unit_cost,max_supply,"
+            "lead_time_days,quality_score\n"
+            '"SUP_001,Test,50,1000,7,90\n'
+            "SUP_002,Test2,48,2000,14,92\n"
+        )
+
+        with pytest.raises(ValueError, match="CSV format error"):
+            load_suppliers_from_csv(str(invalid_csv))
+
+    def test_load_suppliers_csv_missing_columns(self, tmp_path):
+        """必須カラムが足りない場合"""
+        incomplete_csv = tmp_path / "incomplete.csv"
+        incomplete_csv.write_text("supplier_id,supplier_name\nSUP_001,Test")
+
+        with pytest.raises(ValueError, match="missing required columns"):
+            load_suppliers_from_csv(str(incomplete_csv))
+
+    def test_load_suppliers_csv_empty_file(self, tmp_path):
+        """ファイルが空の場合"""
+        empty_csv = tmp_path / "empty.csv"
+        empty_csv.write_text(
+            "supplier_id,supplier_name,unit_cost,max_supply,"
+            "lead_time_days,quality_score"
+        )
+
+        with pytest.raises(ValueError, match="empty"):
+            load_suppliers_from_csv(str(empty_csv))
+
+
+class TestExportToJSON:
+    """JSON エクスポート機能のテスト"""
+
+    def test_export_to_json_success(self, sample_suppliers, tmp_path):
+        """正常な出力"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+
+        output_file = tmp_path / "output.json"
+        success = analyzer.export_to_json(result, str(output_file))
+
+        assert success == True
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+
+        # JSON 形式確認
+        with open(output_file) as f:
+            saved = json.load(f)
+        assert saved["week"] == result["week"]
+
+    def test_export_to_json_invalid_path(self, sample_suppliers):
+        """出力パスが不正な場合"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+
+        # 存在しないディレクトリへの出力
+        invalid_path = "/invalid/nonexistent/path/output.json"
+        success = analyzer.export_to_json(result, invalid_path)
+
+        assert success == False
+
+    def test_export_to_json_non_serializable(self, sample_suppliers, tmp_path):
+        """シリアライズ不可のデータが含まれている場合"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+
+        # 日付オブジェクトを無理やり挿入（テスト用）
+        result["test_date"] = datetime.now()
+
+        output_file = tmp_path / "output.json"
+        success = analyzer.export_to_json(result, str(output_file))
+
+        # TypeError をハンドルして False を返すはず
+        assert success == False
+
+
+class TestExchangeRateValidation:
+    """為替レート検証のテスト"""
+
+    def test_exchange_rate_zero(self):
+        """為替レートが 0 の場合"""
+        invalid_suppliers = [
+            {
+                "supplier_id": "SUP_ZERO",
+                "supplier_name": "Test",
+                "unit_cost": 50,
+                "max_supply": 1000,
+                "lead_time_days": 7,
+                "quality_score": 90,
+                "exchange_rate": 0,  # 無効
+            }
+        ]
+        analyzer = MeritOrderAnalyzer(invalid_suppliers)
+        assert analyzer.validate_suppliers() == False
+        assert any("exchange_rate" in e for e in analyzer.validation_errors)
+
+    def test_exchange_rate_negative(self):
+        """為替レートが負の場合"""
+        invalid_suppliers = [
+            {
+                "supplier_id": "SUP_NEG",
+                "supplier_name": "Test",
+                "unit_cost": 50,
+                "max_supply": 1000,
+                "lead_time_days": 7,
+                "quality_score": 90,
+                "exchange_rate": -0.5,  # 無効
+            }
+        ]
+        analyzer = MeritOrderAnalyzer(invalid_suppliers)
+        assert analyzer.validate_suppliers() == False
+
+    def test_exchange_rate_nan(self):
+        """為替レートが NaN の場合"""
+        invalid_suppliers = [
+            {
+                "supplier_id": "SUP_NAN",
+                "supplier_name": "Test",
+                "unit_cost": 50,
+                "max_supply": 1000,
+                "lead_time_days": 7,
+                "quality_score": 90,
+                "exchange_rate": float('nan'),  # 無効
+            }
+        ]
+        analyzer = MeritOrderAnalyzer(invalid_suppliers)
+        assert analyzer.validate_suppliers() == False
+
+    def test_exchange_rate_string(self):
+        """為替レートが文字列の場合"""
+        invalid_suppliers = [
+            {
+                "supplier_id": "SUP_STR",
+                "supplier_name": "Test",
+                "unit_cost": 50,
+                "max_supply": 1000,
+                "lead_time_days": 7,
+                "quality_score": 90,
+                "exchange_rate": "abc",  # 無効
+            }
+        ]
+        analyzer = MeritOrderAnalyzer(invalid_suppliers)
+        assert analyzer.validate_suppliers() == False
+        assert any("must be a number" in e for e in analyzer.validation_errors)
+
+    def test_exchange_rate_valid(self):
+        """為替レートが有効な場合"""
+        valid_suppliers = [
+            {
+                "supplier_id": "SUP_VALID",
+                "supplier_name": "Test",
+                "unit_cost": 50,
+                "max_supply": 1000,
+                "lead_time_days": 7,
+                "quality_score": 90,
+                "exchange_rate": 0.00075,  # 有効
+            }
+        ]
+        analyzer = MeritOrderAnalyzer(valid_suppliers)
+        assert analyzer.validate_suppliers() == True
 
 
 if __name__ == "__main__":

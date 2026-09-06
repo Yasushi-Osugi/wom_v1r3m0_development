@@ -11,6 +11,8 @@ Merit Order Analyzer
 """
 
 import json
+import math
+import os
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,7 +20,12 @@ from datetime import datetime
 
 @dataclass
 class SupplierInfo:
-    """サプライヤー情報"""
+    """サプライヤー情報
+
+    Attributes:
+        exchange_rate: 為替レート（必ず > 0、デフォルト 1.0）
+            例: KRW は 0.00075、USD は 1.0
+    """
     supplier_id: str
     supplier_name: str
     unit_cost: float  # 元の通貨単位
@@ -112,7 +119,27 @@ class MeritOrderAnalyzer:
                     f"Supplier #{idx} ({supplier.get('supplier_id')}): "
                     f"lead_time_days must be >= 0"
                 )
-            
+
+            # exchange_rate の妥当性チェック
+            exchange_rate = supplier.get("exchange_rate", 1.0)
+            try:
+                exchange_rate_val = float(exchange_rate)
+                if math.isnan(exchange_rate_val):
+                    self.validation_errors.append(
+                        f"Supplier #{idx} ({supplier.get('supplier_id')}): "
+                        f"exchange_rate is NaN"
+                    )
+                elif exchange_rate_val <= 0:
+                    self.validation_errors.append(
+                        f"Supplier #{idx} ({supplier.get('supplier_id')}): "
+                        f"exchange_rate must be > 0, got {exchange_rate}"
+                    )
+            except (ValueError, TypeError):
+                self.validation_errors.append(
+                    f"Supplier #{idx} ({supplier.get('supplier_id')}): "
+                    f"exchange_rate must be a number, got {type(exchange_rate).__name__}"
+                )
+
             # supplier_id の一意性チェック
             supplier_id = supplier.get("supplier_id")
             if supplier_id in supplier_ids:
@@ -336,29 +363,94 @@ class MeritOrderAnalyzer:
         
         return merit_order
     
-    def export_to_json(self, result: Dict, filepath: str):
-        """結果をJSON形式で保存"""
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        print(f"✅ Results exported to {filepath}")
+    def export_to_json(self, result: Dict, filepath: str) -> bool:
+        """結果をJSON形式で保存
+
+        Args:
+            result: Merit Order 分析結果辞書
+            filepath: 出力ファイルパス
+
+        Returns:
+            bool: 成功時 True、失敗時 False
+
+        Raises:
+            なし（内部で全エラーをハンドル）
+        """
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+
+            # 書き込み確認
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                print(f"✅ Results exported to {filepath}")
+                return True
+            else:
+                print(f"❌ Export failed: file not created or empty")
+                return False
+
+        except IOError as e:
+            print(f"❌ IOError: Cannot write to {filepath}: {e}")
+            return False
+
+        except TypeError as e:
+            print(f"❌ TypeError: Result contains non-serializable data: {e}")
+            return False
+
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            return False
 
 
 # ヘルパー関数
 def load_suppliers_from_csv(filepath: str) -> List[Dict]:
     """
     CSVからサプライヤーデータを読み込み
-    
+
     期待されるカラム:
-    supplier_id, supplier_name, unit_cost, max_supply, 
+    supplier_id, supplier_name, unit_cost, max_supply,
     lead_time_days, quality_score, currency, exchange_rate
+
+    Raises:
+        FileNotFoundError: filepath が存在しない場合
+        ValueError: CSV の形式が不正、必須カラムが欠落、またはデータが空の場合
     """
     try:
         import pandas as pd
     except ImportError:
         raise ImportError("pandas is required. Install with: pip install pandas")
-    
-    df = pd.read_csv(filepath)
-    return df.to_dict(orient='records')
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(
+            f"Supplier data file not found: {filepath}"
+        )
+
+    try:
+        df = pd.read_csv(filepath)
+    except pd.errors.ParserError as e:
+        raise ValueError(
+            f"CSV format error in {filepath}: {str(e)[:100]}"
+        ) from e
+    except Exception as e:
+        raise ValueError(
+            f"Failed to read CSV {filepath}: {str(e)[:100]}"
+        ) from e
+
+    required_columns = [
+        "supplier_id", "supplier_name", "unit_cost", "max_supply",
+        "lead_time_days", "quality_score"
+    ]
+    missing_cols = [c for c in required_columns if c not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"CSV is missing required columns: {', '.join(missing_cols)}"
+        )
+
+    result = df.to_dict(orient='records')
+    if not result:
+        raise ValueError(
+            f"CSV file {filepath} is empty (no data rows)"
+        )
+    return result
 
 
 if __name__ == "__main__":
