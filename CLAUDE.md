@@ -1528,3 +1528,77 @@ Tire と Battery の Lot_ID が同一のため重複が吸収され、
 
 石油精製（`global_oil_model_three_steps.md`）に続き、
 **「WOM に何を入れないか」という判断が二度続けて設計を単純にしている。**
+
+---
+
+# v1r4m0（branch `wom-v1r4m0`、baseline = `wom-v1r3m0`）
+
+## Merit Order 分析 Phase 1（エラーハンドリング強化）＋ Phase 2（Regime Map / Pareto Front）（完了、2026-09-06）
+
+**設計文書（正典）**：`requests/Phase1_RequestLetter_to_CodeKun.md`、`requests/Phase2_DesignMD_RegimeMap.md`。
+
+**位置づけ**：`wom/visualization/` 配下に新設した独立モジュール群。**Planning Engine・禁足コアには一切触れていない**（サプライヤー調達分析のための補助ツール、`ask_global_allocation` と同じく Management 層の分析機能）。
+
+### Phase 1：`wom/visualization/merit_order.py`（`MeritOrderAnalyzer`）のエラーハンドリング強化
+- `load_suppliers_from_csv()`：ファイル存在確認（`FileNotFoundError`）→ CSV解析エラー（`pandas.errors.ParserError` を `ValueError` にラップ）→ 必須カラム検証 → 空ファイル検証、の順で追加。
+- `export_to_json()`：戻り値を `bool` に変更（成功 True / 失敗 False）。`IOError`/`TypeError`/その他例外を内部でハンドルし、例外を外に投げない設計に変更。
+- `validate_suppliers()`：`exchange_rate` の `<=0` / NaN / 非数値を検証するロジックを追加（`math.isnan` 使用）。
+- テスト12件追加（既存16件と合わせて `tests/test_merit_order.py` 計28件）、全PASS。
+
+### Phase 2-A：`wom/visualization/regime_map.py`（`RegimeMapAnalyzer`）
+Merit Order の週次結果（`fulfillment_rate`, `average_lead_time`）から、需要レベル（Low/Medium/High）×供給タイト度（Tight/Balanced/Surplus）の3×3マトリクスに分類し、9通りの組み合わせそれぞれに推奨戦略（`cost_lock`/`dual_source`/`safety_stock`/`lean`/`merit_order`/`lead_time_hedge`/`consolidation`/`price_negotiation`/`quality_upgrade`）をマッピングする。`classify_horizon()` で複数週のホライズン分析（`risk_weeks`＝Tight週、`opportunity_weeks`＝Surplus週、遷移確率行列）も提供。`regime_score`（demand_pressure/supply_risk、0-10スケール）の算出式は設計文書に未規定だったため今回定義（詳細は `docs/development/wom-v1r4m0_phase2_regime_pareto.md` §2.2）——大杉さんレビュー待ち。
+
+### Phase 2-B：`wom/visualization/pareto_front.py`（`ParetoFrontAnalyzer`）
+Merit Order の `recommended_allocation`（サプライヤー配分レコードのフラットなリスト）から、Cost（総額）・Quality・Lead Time の3目的について Pareto 支配関係を O(n²) 素朴実装で判定し、Pareto Front（非支配解の集合、cost昇順）とランク間トレードオフ比率を算出する。
+
+**既知の注意点（次回セッションで検討）**：`cost` を「配分量×単価の総額」で定義しているため、配分量が小さいレコードほど総コストが小さくなり Pareto Front 上で無条件に有利になる。複数週・複数サプライヤーの配分レコードをフラットに集約すると「小ロット・高品質・短納期」の1レコードのみが他の全レコードを支配し、Pareto Front が1点に収束する現象を実データで確認済み（設計文書 3.3.2 の使用例通りの操作で発生、バグではなく定義上の帰結）。詳細・補正案は `docs/development/wom-v1r4m0_phase2_regime_pareto.md` §3.3 を参照。
+
+### テスト
+`tests/test_regime_map.py`（12件）・`tests/test_pareto_front.py`（8件）を新規追加。リポジトリ全体 325件全PASS（既存305件に回帰なし）。
+
+### 未対応・次回検討事項
+- Pareto Front の cost 定義（総額 vs 単価、フラットな個別レコード vs 配分セット全体）の扱い方針の確定
+- Regime Map の `regime_score` 算出式の大杉さんレビュー
+- Merit Order → Regime Map → Pareto Front を GUI（Management タブ等）へ統合するかどうかの検討
+
+## v1r4m0: Phase 2 - Regime Map & Pareto Front Analysis（完了、2026-09-06）
+
+**概要**: Merit Order 結果から、市場環境分類と多目標最適化を実施。
+
+### 実装内容
+
+#### Phase 2-A: RegimeMapAnalyzer
+- 需要レベル（Low/Medium/High） × 供給タイト度（Tight/Balanced/Surplus）の 3×3 マトリクス分類
+- 9 つの推奨戦略（cost_lock, dual_source, safety_stock, lean, merit_order, lead_time_hedge, consolidation, price_negotiation, quality_upgrade）
+- 12 週ホライズン分析と risk_weeks/opportunity_weeks の自動抽出
+- **ファイル**: `wom/visualization/regime_map.py`
+
+#### Phase 2-B: ParetoFrontAnalyzer
+- 複数目標最適化（Cost, Quality, Lead Time）
+- 非支配解の列挙アルゴリズム（O(n²) 素朴実装）
+- トレードオフ比率の定量化
+- **ファイル**: `wom/visualization/pareto_front.py`
+
+### テスト結果
+- `test_regime_map.py`: 12 PASS
+- `test_pareto_front.py`: 8 PASS
+- `test_merit_order.py`: 28 PASS（Phase 1、回帰なし）
+- **リポジトリ全体**: 325 PASS（既存 305 + 新規 20）
+
+### 既知の問題（Phase 3 で評価予定）
+
+**Pareto Front の cost 定義**:
+現在「配分量 × 単価」（総コスト）で比較しているため、小ロット案が無条件に有利になる。
+
+補正候補:
+1. Cost を「単価そのもの」に変更（規模非依存）
+2. 「必要数量を満たす配分セット全体」を 1 解として比較（粒度変更）
+
+詳細は `docs/development/wom-v1r4m0_phase2_regime_pareto.md` §3.3 を参照。
+
+### ドキュメント
+- `docs/development/merit_order_code_review_ja.md` - Phase 1 コード品質分析
+- `docs/development/wom-v1r4m0_phase2_regime_pareto.md` - Phase 2 実装ガイド
+- `requests/Phase2_DesignMD_RegimeMap.md` - 設計仕様書
+
+---
