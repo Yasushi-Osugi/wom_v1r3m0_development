@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from wom.visualization.merit_order import MeritOrderAnalyzer
 from wom.visualization.pareto_front import ParetoFrontAnalyzer
 
 
@@ -178,6 +179,109 @@ class TestEndToEnd:
             front, "/invalid/nonexistent/path/output.json"
         )
         assert success_invalid is False
+
+
+@pytest.fixture
+def sample_suppliers():
+    """V0 (Phase 3): plan粒度のテスト用サンプルサプライヤー
+
+    required_qty=5000 に対し、以下3つの demand フィルタが互いに
+    非支配（Pareto Front上で3点とも共存する）ように設計している：
+      - {}                                    -> SUP_002+SUP_001混合（最安）
+      - {"min_quality_acceptable": 95}        -> SUP_001+SUP_003混合（高品質）
+      - {"max_lead_time_acceptable": 5}       -> SUP_004単独（最短納期）
+    """
+    return [
+        {"supplier_id": "SUP_001", "supplier_name": "Alpha", "unit_cost": 50,
+         "max_supply": 3000, "lead_time_days": 14, "quality_score": 95,
+         "exchange_rate": 1.0},
+        {"supplier_id": "SUP_002", "supplier_name": "Beta", "unit_cost": 48,
+         "max_supply": 3000, "lead_time_days": 21, "quality_score": 94,
+         "exchange_rate": 1.0},
+        {"supplier_id": "SUP_003", "supplier_name": "Gamma", "unit_cost": 55,
+         "max_supply": 2000, "lead_time_days": 7, "quality_score": 96,
+         "exchange_rate": 1.0},
+        {"supplier_id": "SUP_004", "supplier_name": "Delta", "unit_cost": 70,
+         "max_supply": 5000, "lead_time_days": 5, "quality_score": 80,
+         "exchange_rate": 1.0},
+    ]
+
+
+class TestPlanGranularity:
+    """V0: 1配分案=1解の粒度（Phase 3-0）"""
+
+    def test_plan_objectives_matches_merit_order_totals(self, sample_suppliers):
+        """compute_plan_objectives() が merit_order result の
+        total_cost / average_quality / average_lead_time と一致する"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+
+        pa = ParetoFrontAnalyzer.from_merit_order_results([result])
+        obj = pa.compute_plan_objectives(result)
+
+        assert obj["cost"] == result["total_cost"]
+        assert obj["quality"] == result["average_quality"]
+        assert obj["lead_time"] == result["average_lead_time"]
+
+    def test_pareto_front_from_plans_multiple_on_front(self, sample_suppliers):
+        """異なる制約で生成した複数の配分案を与えたとき、
+        Pareto Front が1点に収束しないこと（§V0.1 の症状に対する回帰テスト）
+
+        注: merit_order.py の実装上、品質・リードタイムのフィルタは
+        `constraints` ではなく `demand` 辞書のキー
+        （min_quality_acceptable / max_lead_time_acceptable）で指定する。
+        """
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        scenarios = [
+            {},                                  # 制約なし（最安）
+            {"min_quality_acceptable": 95},      # 高品質のみ
+            {"max_lead_time_acceptable": 5},     # 短納期のみ
+        ]
+        results = [
+            analyzer.calculate_merit_order({"required_qty": 5000, **sc})
+            for sc in scenarios
+        ]
+        pa = ParetoFrontAnalyzer.from_merit_order_results(results)
+        front = pa.compute_pareto_front()
+
+        assert len(front) >= 2, (
+            "Pareto Front collapsed to a single point — "
+            "the plan-granularity fix is not working"
+        )
+        # このフィクスチャでは実際に3案とも互いに非支配であることまで確認する
+        assert len(front) == 3
+
+    def test_pareto_front_record_granularity_backward_compat(self, sample_suppliers):
+        """従来の __init__(allocations) 経路が補正前と同じ結果を返すこと"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+        allocations = result["recommended_allocation"]
+
+        pa = ParetoFrontAnalyzer(allocations)
+        assert pa._granularity == "record"
+
+        front = pa.compute_pareto_front()
+        # 各解の cost が allocated_qty * unit_cost_usd（総額）であること
+        for item in front:
+            a = item["allocation"]
+            assert item["cost"] == a["allocated_qty"] * a["unit_cost_usd"]
+
+    def test_lead_time_metric_max_option(self, sample_suppliers):
+        """lead_time_metric='max' で最大リードタイムが採られること"""
+        analyzer = MeritOrderAnalyzer(sample_suppliers)
+        result = analyzer.calculate_merit_order({"required_qty": 5000})
+
+        pa_max = ParetoFrontAnalyzer.from_merit_order_results(
+            [result], lead_time_metric="max"
+        )
+        expected = max(a["lead_time_days"]
+                       for a in result["recommended_allocation"])
+        assert pa_max.compute_plan_objectives(result)["lead_time"] == expected
+
+        # 不正値は ValueError
+        with pytest.raises(ValueError, match="lead_time_metric"):
+            ParetoFrontAnalyzer.from_merit_order_results([result],
+                                                         lead_time_metric="median")
 
 
 if __name__ == "__main__":

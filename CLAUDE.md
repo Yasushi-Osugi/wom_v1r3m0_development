@@ -1602,3 +1602,54 @@ Merit Order の `recommended_allocation`（サプライヤー配分レコード�
 - `requests/Phase2_DesignMD_RegimeMap.md` - 設計仕様書
 
 ---
+
+## v1r4m0: Phase 3 - Merit Order / Regime Map / Pareto Front 可視化層（完了、2026-09-06）
+
+**設計正典**: `requests/Phase3_RequestLetter_to_CodeKun.md`（`requests/Phase3_DesignMD_Visualization.md` rev.3 に基づく。R1/R3/R4 確定・R2 見送り確定済）。
+
+**位置づけ**: `wom/visualization/` の3モジュール（headless・Dict/JSON のみ）に対する matplotlib 静止画描画層。分析ロジックは Phase 3-0（Pareto cost 補正、追加APIのみ）を除き無変更。Planning Engine・禁足コアには一切触れていない。
+
+### Phase 3-0：`pareto_front.py` に plan 粒度を追加（既存 record 粒度は不変）
+既存の `compute_allocation_objectives()`（record粒度＝サプライヤー1社分のレコード単位で cost=配分量×単価の総額）は無変更のまま、`from_merit_order_results()` classmethod・`compute_plan_objectives()`・`compute_all_solutions()` を追加。`_granularity`（既定"record"）を`"plan"`にすると、1解=1配分案（`calculate_merit_order()` 1回分）単位で Pareto 判定できるようになる。**R1確定**：`lead_time_metric`は既定`"weighted_avg"`（`average_lead_time`をそのまま使用）、オプション`"max"`（`recommended_allocation`中の最大値）。これにより、複数週・複数制約の配分案をフラットに集約すると1レコードに支配収束していた既知の問題（CLAUDE.md 前節参照）を解消——実データで3案が相互に非支配のまま Pareto Front に残ることを確認。
+
+### Phase 3-A/B/C：`tools/plot_merit_order_suite.py`（新規、6描画関数＋CLI）
+- **Merit Order曲線**（`plot_merit_order_curve`）：階段積み上げ＋需要線で濃淡分割（需要線がブロックの途中に来る場合は2分割）＋シャドープライスλの水平線注記。供給不足（λ未定義）時は例外を出さず "Unmet demand" 注記に切替。
+- **Merit Order Shift**（`plot_merit_order_shift`）：Before/After 2本の階段を重畳、`supplier_id`ベースでランク入替・new/dropped サプライヤーを検出しテキスト注記。
+- **Regime Map**（`plot_regime_matrix`/`plot_regime_timeline`）：3×3ヒートマップ（戦略名+週数、dominantセルを太枠強調）とホライズン時系列（`regime_score`2本線＋risk/opportunity帯＋戦略色帯）。**R2確定（見送り）**：遷移行列ヒートマップは12週では遷移サンプル11件に対しレジーム81通りで確率値が退化するため、Phase 3では未実装（将来52週以上のホライズンで実測回数ベースの実装を検討、設計文書§4.3.3）。
+- **Pareto Front + 平行座標**（`plot_pareto_scatter`/`build_supplier_share_axes`/`plot_parallel_coordinates`）：目的空間2パネル散布図（Front★+線分+トレードオフ注記、支配解は淡色）。平行座標は**R3確定**で目的軸3本（cost/lead_timeは反転して「上ほど良い」に統一）+ サプライヤー配分比率軸（全案の和集合からMerit Order順に上位K社+Others、[0,1]固定スケール、目的軸群との間に区切り線）。
+- **CLI**（`tools/plot_merit_order_suite.py`、**R4確定**で`tools/plot_allocation_map.py`と同じ`tools/`層に配置）：`--suppliers`/`--required-qty`/`--out`/`--demo`/`--horizon-weeks`。`--demo`は内蔵5サプライヤーの決定的データ（乱数不使用）で6枚のPNGを一発生成。
+
+### 実装上の発見・調整（次のClaude君へ）
+- **平行座標の下端実値ラベルが既定のxtickラベルと重なるバグ**：matplotlibの既定xtickラベルは軸線から一定ポイント数下に固定描画されるため、データ座標で任意の位置に置いた自前の実値ラベルと視覚的に衝突する。`ax.set_xticklabels([])`で既定ラベルを無効化し、実値ラベル・軸名ラベルとも自前でdata座標に描画することで解消。
+- **`--demo`内蔵サプライヤーの初期設定ではRegime MapがLow/Balancedに固定され続けるデモになりがちな点に注意**：最安サプライヤー群のlead_timeがいずれもTight閾値（threshold+range=21日）を大きく超えない構成だと、どれだけ需要を振ってもTight/Surplusレジームに到達しない（加重平均の上限が総容量の加重平均で頭打ちになるため）。デモ用に「緊急調達枠」的な高コスト・長納期サプライヤーを1社加え、そのlead_timeを十分に大きく（閾値の2倍超程度）設定して初めてTightレジームが出現する。
+- Pareto Front の cost 定義の性質（record粒度での総額比較の注意点）は前節の通り解消済みだが、**汎用の `_plan_scenarios()`（quality/lead_timeの中央値を閾値にする、CSVモード用フォールバック）は、データセット次第では複数シナリオが同一配分に収束しうる**（バグではない。`--demo`専用には`DEMO_PLAN_SCENARIOS`という手動選定の3シナリオを別途用意し、3案が相互に非支配になることを確認済み）。
+
+### テスト・確認結果
+```
+tests/test_merit_order_plot.py : 9 passed（スモーク7 + 軸構築ロジック2）
+tests/test_pareto_front.py     : 12 passed（既存8 + 新規4、既存8件は無変更）
+リポジトリ全体                  : 338 passed（既存325 + 新規13、回帰なし）
+golden 12ケース（13件）         : 全PASS（不変、Planning Engine 無接触のため自明だが確認済み）
+```
+`python -m tools.plot_merit_order_suite --demo` で6枚のPNGを生成し、大杉さんへ目視QA用に送付済み（依存チェック：plotly/bokeh/dash/streamlit/seaborn の実使用なし、図中テキストへの日本語混入なし、を確認済み）。
+
+### 未対応・Phase 4 送り
+- 遷移行列ヒートマップ（R2見送り、52週以上のホライズンで実測回数ベースの実装を検討）
+- レジーム地図の軸を外部環境パラメータ空間（USD/JPY×関税率）へ差し替え、`ask_global_allocation`（A系統）への接続、階層化三角図、N市場（N≥4）拡張——いずれもPhase 4スコープ（設計文書§11、`oil-global-2027`の日本/欧州/米州3市場体制が階層化三角図の適用候補として記録済み）
+
+### Phase 3 修正：図の判読性（F1/F2/F3、完了、2026-09-06）
+
+**設計文書**: `requests/request_fix_phase3_plot_readability.md`。目視QA後に大杉さんから依頼された3点の体裁修正（ロジックの誤りではない）。
+
+- **F1**（`plot_merit_order_shift()`）：需要線（`required_qty`の垂直破線）が無く、λが「需要線と階段の交点の高さ」であることが図から読み取れなかった。設計書§3.2の記述漏れ（実装ミスではない）。需要線（before/after同値なら黒破線1本、異なれば色分け2本）+ 交点`(required_qty, λ)`への丸マーカー（凡例には非表示）を追加
+- **F2-1**（同関数）：凡例が After 曲線の右端（最高値サプライヤー区間）に重なっていたため`loc="upper left"`に変更（階段は左端が最安＝左上が構造的に必ず空く）、`framealpha=0.9`追加
+- **F2-2**（`plot_regime_timeline()`）：Y軸`[0,10]`固定（週間比較のため変更不可）の制約下で`supply_risk`のピーク（9〜10）が凡例に隠れていた。凡例を軸外・上・横並び（`bbox_to_anchor=(0.0,1.01)`, `ncol=2`, `frameon=False`）に移し、タイトルは`ax_top.set_title()`から`fig.suptitle()`へ移動して凡例との領域取り合いを解消
+- **F3**（`plot_regime_matrix()`）：`(1 weeks)`の単複表記を`_weeks_label()`ヘルパー新設（`0 weeks`/`1 week`/`2 weeks`...）で解消
+
+新規テスト1件（`test_weeks_label_singular_plural`）追加、既存338件は無変更で全PASS——**リポジトリ全体339件全PASS**。golden 13件も不変（本修正はPlanning Engineに一切触れない）。`--demo`再生成6枚を目視確認し、F1〜F3すべて意図通り反映、他4枚（curve/pareto_scatter/parallel_coordinates/regime_matrixの配置）に意図しない変化がないことを確認済み。
+
+**テスト実行時の注意（次のClaude君へ）**：`tests/test_golden.py`を含む複数のpytestプロセスを**並行して**同一リポジトリに対して実行すると、`apparel-us-2026`のwarm-up materialize（write-if-needed、CSV再生成）が競合し、`test_golden_matches[apparel-us-2026]`が一時的にFAILすることがある（本セッションで実際に再現）。単独実行・逐次実行では再現せず13件common全PASSに戻る。**golden系テストは他のpytest実行と並行させず、常に単独で（または`tests/`全体を1プロセスで）実行すること。**
+
+**追加の微調整（大杉さんの目視QAで発見、2026-09-06）**：F2-2でタイトルを`fig.suptitle()`へ移した際、上部の余白が図全体の高さの約15%（133px/910px）にまで間延びする副作用があった。`fig.suptitle(..., y=0.995)` ＋ `fig.tight_layout(rect=(0, 0, 1, 0.99))`（`y`と`rect`上端をともに1.0へ寄せる）に調整し、ピクセル計測で約50px（5.5%）まで圧縮——タイトル・凡例・`supply_risk`ピークいずれも重ならない範囲で詰められる限界値に近い（`rect`上端を0.99超にしてもtight_layoutの効果が頭打ちになることを確認済み）。
+
+---
